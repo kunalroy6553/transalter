@@ -1,0 +1,104 @@
+import os
+import tempfile
+import warnings
+import whisper
+from gtts import gTTS
+from googletrans import Translator
+import librosa
+import soundfile as sf
+from librosa.effects import time_stretch
+from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips
+
+warnings.filterwarnings("ignore", message="FP16 is not supported on CPU*")
+
+def change_audio_speed(src, dst, rate):
+    y, sr = librosa.load(src, sr=None)
+    y2 = time_stretch(y=y, rate=rate)
+    sf.write(dst, y2, sr)
+    return len(y2) / sr
+
+def main():
+    video = VideoFileClip("input_video.mp4")
+    vid_len = video.duration
+    print(f"🎬 Video duration: {vid_len:.2f}s")
+
+    tmp = tempfile.mktemp(suffix=".wav")
+    video.audio.write_audiofile(tmp)
+    print("✅ Extracted audio for transcription")
+
+    model = whisper.load_model("base")
+    print("🔍 Transcribing...")
+    segments = model.transcribe(tmp)["segments"]
+    print(f"📝 {len(segments)} segments detected")
+
+    translator = Translator()
+    video_clips, audio_clips = [], []
+
+    for i, seg in enumerate(segments):
+        st, ed = seg["start"], min(seg["end"], vid_len)
+        dur = ed - st
+        if dur <= 0:
+            continue
+
+        en = seg["text"].strip()
+        print(f"\nSegment {i}: {st:.2f}-{ed:.2f} ({dur:.2f}s)\n  EN: {en}")
+
+        hi = translator.translate(en, src="en", dest="hi").text.strip()
+        print(f"  HI: {hi}")
+
+        mp3f = tempfile.mktemp(suffix=".mp3")
+        gTTS(hi, lang="hi").save(mp3f)
+
+        wav1 = tempfile.mktemp(suffix=".wav")
+        y, sr = librosa.load(mp3f, sr=None)
+        sf.write(wav1, y, sr)
+
+        wav2 = tempfile.mktemp(suffix=".wav")
+        fast_len = change_audio_speed(wav1, wav2, rate=1.10)
+        print(f"  Fast TTS = {fast_len:.2f}s vs {dur:.2f}s")
+
+        clip = video.subclipped(st, ed)
+
+        if fast_len <= dur:
+            r = fast_len / dur
+            wav3 = tempfile.mktemp(suffix=".wav")
+            change_audio_speed(wav2, wav3, rate=r)
+            audio_clip = AudioFileClip(wav3)
+            video_clip = clip
+            print(f"  Audio stretched by {r:.3f}")
+        else:
+            fct = dur / fast_len
+            video_clip = clip.with_speed_scaled(factor=fct)
+            audio_clip = AudioFileClip(wav2)
+            print(f"  Video slowed by {fct:.3f}")
+
+        video_clips.append(video_clip)
+        audio_clips.append(audio_clip)
+
+        os.remove(mp3f)
+        os.remove(wav1)
+
+    print("\n🔗 Concatenating segments...")
+    final_video = concatenate_videoclips(video_clips, method="compose")
+    final_audio = concatenate_audioclips(audio_clips)
+    final_video = final_video.with_audio(final_audio)
+
+    print("💾 Writing final_output.mp4 ...")
+    final_video.write_videofile(
+        "final_output.mp4",
+        codec="libx264",
+        audio_codec="aac",
+        audio_bitrate="192k",
+        preset="ultrafast",
+        threads=8,
+        temp_audiofile="temp-audio.m4a",
+        remove_temp=True
+    )
+
+    os.remove(tmp)
+    video.close()
+    final_video.close()
+    print("✅ Done.")
+
+if __name__ == "__main__":
+    main()
